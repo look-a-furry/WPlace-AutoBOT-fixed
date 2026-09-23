@@ -1406,7 +1406,7 @@ localStorage.removeItem("lp");
       // TILE REQUEST logging removed to reduce console spam
 
       if (typeof url === 'string') {
-        if (url.includes('https://backend.wplace.live/s0/pixel/')) {
+        if (url.includes('/s0/pixel/') || url.includes('/paint')) {
           try {
             const payload = JSON.parse(args[1].body);
             if (payload.t) {
@@ -1421,6 +1421,9 @@ localStorage.removeItem("lp");
                 }, Length: ${payload.t?.length || 0}`
               );
               window.postMessage({ source: 'turnstile-capture', token: payload.t }, '*');
+            } else {
+              console.log(`🔍✅ Paint request captured but no Turnstile token found. Bypassing...`);
+              window.postMessage({ source: 'turnstile-capture', token: 'bypassed_no_token_required' }, '*');
             }
           } catch (_) {
             /* ignore */
@@ -9286,27 +9289,38 @@ localStorage.removeItem("lp");
             const tempFetch = async (url, options) => {
               if (
                 typeof url === 'string' &&
-                url.includes('/s0/pixel/') &&
-                options &&
-                options.method === 'POST'
+                (url.includes('/s0/pixel/') || url.includes('/paint')) &&
+                options?.method?.toUpperCase() === 'POST'
               ) {
-                let coords;
+                let bodyObj;
                 try {
-                  const body = JSON.parse(options.body);
-                  coords = body.coords;
+                  bodyObj = JSON.parse(options.body);
                 } catch (e) {
                   return window.originalFetch(url, options);
                 }
 
-                const tileMatches = url.match(/\/s0\/pixel\/(\-?\d+)\/(\-?\d+)/);
-                if (tileMatches && coords && coords.length >= 2) {
-                  const tileX = parseInt(tileMatches[1]);
-                  const tileY = parseInt(tileMatches[2]);
-                  const pixelX = coords[0];
-                  const pixelY = coords[1];
+                let region = null;
+                let startPos = null;
 
-                  state.startPosition = { x: pixelX, y: pixelY };
-                  state.region = { x: tileX, y: tileY };
+                if (bodyObj?.tiles && Array.isArray(bodyObj.tiles) && bodyObj.tiles.length > 0) {
+                  const tile = bodyObj.tiles[0];
+                  if (tile.x !== undefined && tile.y !== undefined) {
+                    region = { x: tile.x, y: tile.y };
+                    if (tile.pixels && Array.isArray(tile.pixels.x) && Array.isArray(tile.pixels.y) && tile.pixels.x.length > 0) {
+                      startPos = { x: tile.pixels.x[0], y: tile.pixels.y[0] };
+                    }
+                  }
+                } else {
+                  const tileMatches = url.match(/\/s0\/pixel\/(\-?\d+)\/(\-?\d+)/);
+                  if (tileMatches && bodyObj?.coords && bodyObj.coords.length >= 2) {
+                    region = { x: parseInt(tileMatches[1]), y: parseInt(tileMatches[2]) };
+                    startPos = { x: bodyObj.coords[0], y: bodyObj.coords[1] };
+                  }
+                }
+
+                if (region && startPos) {
+                  state.startPosition = startPos;
+                  state.region = region;
                   state.selectingPosition = false;
 
                   console.log('🎯 Position selected for extracted artwork:', {
@@ -9415,31 +9429,40 @@ localStorage.removeItem("lp");
         const tempFetch = async (url, options) => {
           if (
             typeof url === 'string' &&
-            url.includes('https://backend.wplace.live/s0/pixel/') &&
+            (url.includes('/s0/pixel/') || url.includes('/paint')) &&
             options?.method?.toUpperCase() === 'POST'
           ) {
             try {
-              const response = await originalFetch(url, options);
-              const clonedResponse = response.clone();
-              const data = await clonedResponse.json();
+              let bodyObj;
+              try {
+                bodyObj = JSON.parse(options.body);
+              } catch (e) {}
 
-              if (data?.painted === 1) {
-                const regionMatch = url.match(/\/pixel\/(\d+)\/(\d+)/);
-                if (regionMatch && regionMatch.length >= 3) {
-                  state.region = {
-                    x: Number.parseInt(regionMatch[1]),
-                    y: Number.parseInt(regionMatch[2]),
-                  };
+              let region = null;
+              let startPos = null;
+
+              if (bodyObj?.tiles && Array.isArray(bodyObj.tiles) && bodyObj.tiles.length > 0) {
+                const tile = bodyObj.tiles[0];
+                if (tile.x !== undefined && tile.y !== undefined) {
+                  region = { x: tile.x, y: tile.y };
+                  if (tile.pixels && Array.isArray(tile.pixels.x) && Array.isArray(tile.pixels.y) && tile.pixels.x.length > 0) {
+                    startPos = { x: tile.pixels.x[0], y: tile.pixels.y[0] };
+                  }
                 }
+              } else {
+                const tileMatches = url.match(/\/s0\/pixel\/(\-?\d+)\/(\-?\d+)/);
+                if (tileMatches && bodyObj?.coords && bodyObj.coords.length >= 2) {
+                  region = { x: parseInt(tileMatches[1]), y: parseInt(tileMatches[2]) };
+                  startPos = { x: bodyObj.coords[0], y: bodyObj.coords[1] };
+                }
+              }
 
-                const payload = JSON.parse(options.body);
-                if (payload?.coords && Array.isArray(payload.coords)) {
-                  state.startPosition = {
-                    x: payload.coords[0],
-                    y: payload.coords[1],
-                  };
-                  // Keep existing lastPosition to continue from where we left off
-                  // state.lastPosition = { x: 0, y: 0 }; // REMOVED: Don't reset position
+              if (region && startPos) {
+                state.region = region;
+                state.startPosition = startPos;
+                
+                // Keep existing lastPosition to continue from where we left off
+                // state.lastPosition = { x: 0, y: 0 }; // REMOVED: Don't reset position
 
                   // Update overlay position with validation
                   try {
@@ -9467,10 +9490,10 @@ localStorage.removeItem("lp");
                   state.selectingPosition = false;
                   updateUI('positionSet', 'success');
                 }
-              }
 
-              return response;
-            } catch {
+              return originalFetch(url, options);
+            } catch (err) {
+              console.error('❌ Error in tempFetch:', err);
               return originalFetch(url, options);
             }
           }
@@ -11003,13 +11026,29 @@ localStorage.removeItem("lp");
 
     try {
       const payload = { coords, colors, t: token, fp: fpStr32 };
-      var wasmtoken = await createWasmToken(regionX, regionY, payload);
-      const res = await fetch(`https://backend.wplace.live/s0/pixel/${regionX}/${regionY}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=UTF-8', "x-pawtect-token": wasmtoken },
-        credentials: 'include',
-        body: JSON.stringify(payload),
-      });
+      var wasmResult = await createWasmToken(regionX, regionY, payload);
+      
+      let fetchArgs = {};
+      if (typeof wasmResult === 'object' && wasmResult !== null && wasmResult.body) {
+        // New API
+        fetchArgs = {
+          method: 'POST',
+          headers: wasmResult.headers,
+          credentials: 'include',
+          body: wasmResult.body,
+        };
+      } else {
+        // Fallback to old API if hook failed
+        fetchArgs = {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=UTF-8', "x-pawtect-token": wasmResult },
+          credentials: 'include',
+          body: JSON.stringify(payload),
+        };
+      }
+      
+      const endpoint = fetchArgs.body.includes('"season"') ? `https://backend.wplace.live/paint` : `https://backend.wplace.live/s0/pixel/${regionX}/${regionY}`;
+      const res = await fetch(endpoint, fetchArgs);
 
       if (res.status === 403) {
         let data = null;
@@ -11459,15 +11498,19 @@ localStorage.removeItem("lp");
       console.log('🚀 Hooking API client to capture token...');
       const originalRequest = mod.a.request.bind(mod.a);
       let capturedToken = null;
+      let capturedBody = null;
+      let capturedHeaders = null;
 
       mod.a.request = async function(url, options) {
         // Intercept the token from headers
         if (options && options.headers && options.headers['x-pawtect-token']) {
           capturedToken = options.headers['x-pawtect-token'];
-          console.log('✅ Token captured via hook');
+          capturedBody = options.body;
+          capturedHeaders = options.headers;
+          console.log('✅ Token and payload captured via hook');
           
           // Return fake success to satisfy paint() execution flow
-          return { status: 200, json: async () => ({}) };
+          return { status: 200, json: async () => ({ painted: paintPixels.length }) };
         }
         // Pass through other requests (like /me)
         return originalRequest(url, options);
@@ -11492,6 +11535,9 @@ localStorage.removeItem("lp");
         console.log('🎉 SUCCESS!');
         console.log('🔑 Full token:');
         console.log(capturedToken);
+        if (capturedBody) {
+          return { token: capturedToken, body: capturedBody, headers: capturedHeaders };
+        }
         return capturedToken;
       } else {
         console.error('❌ Failed to capture token via hooking');
